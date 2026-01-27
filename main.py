@@ -46,22 +46,39 @@ def en_ventana(ts, ventana):
 def formatear_con_apostrofo(dt):
     if pd.isna(dt) or dt == "" or str(dt) == "nan":
         return ""
-    hora_12 = dt.strftime("%I").lstrip("0")
-    if hora_12 == "":
-        hora_12 = "12"
-    texto = f"{dt.strftime('%d/%m/%Y')} {hora_12}:{dt.strftime('%M:%S')} {dt.strftime('%p')}"
-    texto = texto.replace("AM", "a. m.").replace("PM", "p. m.")
-    return "'" + texto
+    try:
+        hora_12 = dt.strftime("%I").lstrip("0")
+        if hora_12 == "":
+            hora_12 = "12"
+        texto = f"{dt.strftime('%d/%m/%Y')} {hora_12}:{dt.strftime('%M:%S')} {dt.strftime('%p')}"
+        texto = texto.replace("AM", "a. m.").replace("PM", "p. m.")
+        return "'" + texto
+    except:
+        return ""
 
 def procesar_dataframe(df_filtrado):
     df = df_filtrado.copy()
 
-    # parsear "25/11/2025 7:34:48 a. m."
+    # parsear "10/12/2025 7:04:00 p. m."
     df["Fecha/Hora"] = pd.to_datetime(
         df["Fecha/Hora"].astype(str).str.replace("a. m.", "AM").str.replace("p. m.", "PM"),
         format="%d/%m/%Y %I:%M:%S %p",
         errors="coerce"
     )
+
+    # Filtrar filas donde no se pudo parsear la fecha
+    df = df.dropna(subset=["Fecha/Hora"])
+    
+    if df.empty:
+        # Si no hay datos válidos, retornar DataFrame vacío con estructura correcta
+        return pd.DataFrame(columns=[
+            "Nombre y Apellido",
+            "Fecha Inicial",
+            "Fecha Inicio Almuerzo",
+            "Fecha Fin Almuerzo",
+            "Fecha Final",
+            "Sin Clasificar"
+        ])
 
     df["Fecha"] = df["Fecha/Hora"].dt.date
 
@@ -114,11 +131,23 @@ def procesar_dataframe(df_filtrado):
 
         rows.append(fila)
 
-    df_final = pd.DataFrame(rows)
-
-    # convertir todas las columnas de fecha a texto formateado
-    for col in ["Fecha Inicial", "Fecha Inicio Almuerzo", "Fecha Fin Almuerzo", "Fecha Final"]:
-        df_final[col] = df_final[col].apply(formatear_con_apostrofo)
+    # Verificar si hay rows antes de crear DataFrame
+    if not rows:
+        df_final = pd.DataFrame(columns=[
+            "Nombre y Apellido",
+            "Fecha Inicial",
+            "Fecha Inicio Almuerzo",
+            "Fecha Fin Almuerzo",
+            "Fecha Final",
+            "Sin Clasificar"
+        ])
+    else:
+        df_final = pd.DataFrame(rows)
+        
+        # convertir todas las columnas de fecha a texto formateado
+        for col in ["Fecha Inicial", "Fecha Inicio Almuerzo", "Fecha Fin Almuerzo", "Fecha Final"]:
+            if col in df_final.columns:
+                df_final[col] = df_final[col].apply(formatear_con_apostrofo)
 
     df_final = df_final.astype(str)
     return df_final
@@ -156,15 +185,47 @@ async def process_file(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error leyendo Excel: {str(e)}")
 
+    # Verificar que el DataFrame no esté vacío
+    if df.empty:
+        raise HTTPException(status_code=400, detail="El archivo Excel está vacío")
+
     columnas = ["Nombre y Apellido", "Fecha/Hora"]
     if not all(c in df.columns for c in columnas):
-        raise HTTPException(status_code=400, detail=f"Faltan columnas: {columnas}")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Faltan columnas. Se esperan: {columnas}. Columnas encontradas: {list(df.columns)}"
+        )
+
+    # Filtrar columnas necesarias y eliminar filas completamente vacías
+    df_filtrado = df[columnas].copy()
+    df_filtrado = df_filtrado.dropna(how='all')
+    
+    if df_filtrado.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="No hay datos válidos en las columnas requeridas"
+        )
 
     # Procesar datos
     try:
-        df_final = procesar_dataframe(df[columnas])
+        df_final = procesar_dataframe(df_filtrado)
+    except KeyError as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error procesando datos - columna faltante: {str(e)}"
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error procesando datos: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error procesando datos: {str(e)}"
+        )
+
+    # Verificar que el resultado tiene datos
+    if df_final.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="No se pudieron procesar los datos. Verifica el formato de las fechas."
+        )
 
     # Exportar en el formato especificado
     out = io.BytesIO()
@@ -177,7 +238,7 @@ async def process_file(
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             filename = "procesado.xlsx"
         else:  # xls
-            # Usar xlsxwriter para compatibilidad (genera .xlsx moderno)
+            # Usar xlsxwriter para compatibilidad
             with pd.ExcelWriter(out, engine="xlsxwriter") as wr:
                 df_final.to_excel(wr, index=False, sheet_name="Asistencia")
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -204,7 +265,8 @@ async def root():
         "version": "2.0",
         "endpoint": "/process",
         "formatos_soportados": ["xlsx", "xls"],
-        "columnas_requeridas": ["Nombre y Apellido", "Fecha/Hora"]
+        "columnas_requeridas": ["Nombre y Apellido", "Fecha/Hora"],
+        "formato_fecha": "dd/mm/yyyy h:mm:ss a. m./p. m."
     }
 
 
