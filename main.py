@@ -114,9 +114,8 @@ def procesar_dataframe(df_filtrado):
 
         rows.append(fila)
 
-    # 🔥 FIX: Verificar que hay filas antes de crear el DataFrame
+    # Verificar que hay filas antes de crear el DataFrame
     if not rows:
-        # Si no hay filas, crear un DataFrame vacío con las columnas correctas
         df_final = pd.DataFrame(columns=[
             "Nombre y Apellido",
             "Fecha Inicial",
@@ -130,7 +129,7 @@ def procesar_dataframe(df_filtrado):
 
         # convertir todas las columnas de fecha a texto formateado
         for col in ["Fecha Inicial", "Fecha Inicio Almuerzo", "Fecha Fin Almuerzo", "Fecha Final"]:
-            if col in df_final.columns:  # 🔥 FIX: Verificar que la columna existe
+            if col in df_final.columns:
                 df_final[col] = df_final[col].apply(formatear_con_apostrofo)
 
     df_final = df_final.astype(str)
@@ -186,7 +185,7 @@ async def process_file(
             detail=f"Faltan columnas requeridas. Se esperan: {columnas}. Columnas encontradas: {list(df.columns)}"
         )
 
-    # 🔥 FIX: Filtrar filas vacías antes de procesar
+    # Filtrar filas vacías antes de procesar
     df_filtrado = df[columnas].dropna(how='all')
     
     if df_filtrado.empty:
@@ -208,15 +207,18 @@ async def process_file(
     
     try:
         if export_format == "xlsx":
+            # Usar openpyxl para .xlsx
             with pd.ExcelWriter(out, engine="openpyxl") as wr:
                 df_final.to_excel(wr, index=False, sheet_name="Asistencia")
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             filename = "procesado.xlsx"
         else:  # xls
-            with pd.ExcelWriter(out, engine="xlwt") as wr:
+            # 🔥 Usar xlsxwriter para .xls (realmente genera .xlsx pero compatible)
+            with pd.ExcelWriter(out, engine="xlsxwriter") as wr:
                 df_final.to_excel(wr, index=False, sheet_name="Asistencia")
-            media_type = "application/vnd.ms-excel"
-            filename = "procesado.xls"
+            # Aunque el usuario pida .xls, devolvemos .xlsx que es más moderno
+            media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            filename = "procesado.xlsx"  # Mantenemos .xlsx por compatibilidad
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -241,8 +243,9 @@ async def root():
         "message": "API de Procesamiento de Asistencia",
         "version": "2.0",
         "endpoint": "/process",
-        "formatos_soportados": ["xlsx", "xls"],
-        "columnas_requeridas": ["Nombre y Apellido", "Fecha/Hora"]
+        "formatos_soportados": ["xlsx", "xls (convertido a xlsx)"],
+        "columnas_requeridas": ["Nombre y Apellido", "Fecha/Hora"],
+        "nota": "Ambos formatos generan archivos .xlsx por compatibilidad"
     }
 
 
