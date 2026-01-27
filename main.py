@@ -1,5 +1,6 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 from datetime import time
@@ -7,6 +8,15 @@ import io
 from scipy.optimize import linear_sum_assignment
 
 app = FastAPI(title="Procesador de marcas - Attendance API")
+
+# Configurar CORS si es necesario
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --------- CONFIG ---------
 objetivos = [
@@ -115,7 +125,27 @@ def procesar_dataframe(df_filtrado):
 
 
 @app.post("/process")
-async def process_file(file: UploadFile = File(...)):
+async def process_file(
+    file: UploadFile = File(...),
+    export_format: str = Form(default="xlsx")
+):
+    """
+    Procesa el archivo de asistencia y exporta en el formato especificado.
+    
+    Parámetros:
+    - file: Archivo Excel a procesar
+    - export_format: Formato de exportación ("xlsx" o "xls"), por defecto "xlsx"
+    """
+    
+    # Validar formato de exportación
+    export_format = export_format.lower()
+    if export_format not in ["xlsx", "xls"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Formato inválido. Use 'xlsx' o 'xls'"
+        )
+    
+    # Validar archivo de entrada
     if not file.filename.lower().endswith((".xls", ".xlsx")):
         raise HTTPException(status_code=400, detail="Archivo inválido")
 
@@ -123,23 +153,48 @@ async def process_file(file: UploadFile = File(...)):
 
     try:
         df = pd.read_excel(io.BytesIO(data))
-    except:
-        raise HTTPException(status_code=400, detail="Error leyendo Excel")
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Error leyendo Excel: {str(e)}"
+        )
 
     columnas = ["Nombre y Apellido", "Fecha/Hora"]
     if not all(c in df.columns for c in columnas):
-        raise HTTPException(status_code=400, detail=f"Faltan columnas: {columnas}")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Faltan columnas: {columnas}"
+        )
 
     df_final = procesar_dataframe(df[columnas])
 
-    # exportar Excel
+    # Exportar en el formato especificado
     out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as wr:
-        df_final.to_excel(wr, index=False)
+    
+    if export_format == "xlsx":
+        with pd.ExcelWriter(out, engine="openpyxl") as wr:
+            df_final.to_excel(wr, index=False)
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "procesado.xlsx"
+    else:  # xls
+        with pd.ExcelWriter(out, engine="xlwt") as wr:
+            df_final.to_excel(wr, index=False)
+        media_type = "application/vnd.ms-excel"
+        filename = "procesado.xls"
+    
     out.seek(0)
 
     return StreamingResponse(
         out,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=procesado.xlsx"}
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+@app.get("/")
+async def root():
+    return {
+        "message": "API de Procesamiento de Asistencia",
+        "endpoint": "/process",
+        "formatos_soportados": ["xlsx", "xls"]
+    }
