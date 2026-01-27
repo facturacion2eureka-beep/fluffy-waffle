@@ -9,7 +9,7 @@ from scipy.optimize import linear_sum_assignment
 
 app = FastAPI(title="Procesador de marcas - Attendance API")
 
-# Configurar CORS si es necesario
+# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -114,11 +114,24 @@ def procesar_dataframe(df_filtrado):
 
         rows.append(fila)
 
-    df_final = pd.DataFrame(rows)
+    # 🔥 FIX: Verificar que hay filas antes de crear el DataFrame
+    if not rows:
+        # Si no hay filas, crear un DataFrame vacío con las columnas correctas
+        df_final = pd.DataFrame(columns=[
+            "Nombre y Apellido",
+            "Fecha Inicial",
+            "Fecha Inicio Almuerzo",
+            "Fecha Fin Almuerzo",
+            "Fecha Final",
+            "Sin Clasificar"
+        ])
+    else:
+        df_final = pd.DataFrame(rows)
 
-    # convertir todas las columnas de fecha a texto formateado
-    for col in ["Fecha Inicial", "Fecha Inicio Almuerzo", "Fecha Fin Almuerzo", "Fecha Final"]:
-        df_final[col] = df_final[col].apply(formatear_con_apostrofo)
+        # convertir todas las columnas de fecha a texto formateado
+        for col in ["Fecha Inicial", "Fecha Inicio Almuerzo", "Fecha Fin Almuerzo", "Fecha Final"]:
+            if col in df_final.columns:  # 🔥 FIX: Verificar que la columna existe
+                df_final[col] = df_final[col].apply(formatear_con_apostrofo)
 
     df_final = df_final.astype(str)
     return df_final
@@ -147,47 +160,78 @@ async def process_file(
     
     # Validar archivo de entrada
     if not file.filename.lower().endswith((".xls", ".xlsx")):
-        raise HTTPException(status_code=400, detail="Archivo inválido")
+        raise HTTPException(status_code=400, detail="Archivo inválido. Debe ser .xlsx o .xls")
 
-    data = await file.read()
+    try:
+        data = await file.read()
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Error leyendo el archivo: {str(e)}"
+        )
 
     try:
         df = pd.read_excel(io.BytesIO(data))
     except Exception as e:
         raise HTTPException(
             status_code=400, 
-            detail=f"Error leyendo Excel: {str(e)}"
+            detail=f"Error procesando Excel: {str(e)}"
         )
 
+    # Validar columnas requeridas
     columnas = ["Nombre y Apellido", "Fecha/Hora"]
     if not all(c in df.columns for c in columnas):
         raise HTTPException(
             status_code=400, 
-            detail=f"Faltan columnas: {columnas}"
+            detail=f"Faltan columnas requeridas. Se esperan: {columnas}. Columnas encontradas: {list(df.columns)}"
         )
 
-    df_final = procesar_dataframe(df[columnas])
+    # 🔥 FIX: Filtrar filas vacías antes de procesar
+    df_filtrado = df[columnas].dropna(how='all')
+    
+    if df_filtrado.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="El archivo no contiene datos válidos en las columnas requeridas"
+        )
+
+    try:
+        df_final = procesar_dataframe(df_filtrado)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error procesando datos: {str(e)}"
+        )
 
     # Exportar en el formato especificado
     out = io.BytesIO()
     
-    if export_format == "xlsx":
-        with pd.ExcelWriter(out, engine="openpyxl") as wr:
-            df_final.to_excel(wr, index=False)
-        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        filename = "procesado.xlsx"
-    else:  # xls
-        with pd.ExcelWriter(out, engine="xlwt") as wr:
-            df_final.to_excel(wr, index=False)
-        media_type = "application/vnd.ms-excel"
-        filename = "procesado.xls"
+    try:
+        if export_format == "xlsx":
+            with pd.ExcelWriter(out, engine="openpyxl") as wr:
+                df_final.to_excel(wr, index=False, sheet_name="Asistencia")
+            media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            filename = "procesado.xlsx"
+        else:  # xls
+            with pd.ExcelWriter(out, engine="xlwt") as wr:
+                df_final.to_excel(wr, index=False, sheet_name="Asistencia")
+            media_type = "application/vnd.ms-excel"
+            filename = "procesado.xls"
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error exportando archivo: {str(e)}"
+        )
     
     out.seek(0)
 
     return StreamingResponse(
         out,
         media_type=media_type,
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
     )
 
 
@@ -195,6 +239,13 @@ async def process_file(
 async def root():
     return {
         "message": "API de Procesamiento de Asistencia",
+        "version": "2.0",
         "endpoint": "/process",
-        "formatos_soportados": ["xlsx", "xls"]
+        "formatos_soportados": ["xlsx", "xls"],
+        "columnas_requeridas": ["Nombre y Apellido", "Fecha/Hora"]
     }
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "attendance-processor"}
