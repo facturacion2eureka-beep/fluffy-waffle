@@ -1,13 +1,8 @@
-# FastAPI y servidor
+python-multipart==0.0.7
 fastapi==0.109.0
 uvicorn==0.29.0
-python-multipart==0.0.7
-
-# Procesamiento de datos
 pandas==2.2.3
 numpy==1.26.4
-scipy==1.11.3
-
-# Manejo de Excel
 openpyxl==3.1.2
+scipy==1.11.3
 xlsxwriter==3.1.9
