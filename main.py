@@ -3,9 +3,14 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
-from datetime import time
+from datetime import time, datetime
 import io
 from scipy.optimize import linear_sum_assignment
+import logging
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Procesador de marcas - Attendance API")
 
@@ -56,21 +61,65 @@ def formatear_con_apostrofo(dt):
     except:
         return ""
 
+def parsear_fecha_flexible(fecha_str):
+    """
+    Parsea fechas en múltiples formatos comunes
+    """
+    if pd.isna(fecha_str):
+        return pd.NaT
+    
+    # Si ya es datetime, retornarlo
+    if isinstance(fecha_str, (pd.Timestamp, datetime)):
+        return pd.Timestamp(fecha_str)
+    
+    fecha_str = str(fecha_str).strip()
+    
+    # Normalizar a.m. y p.m. a AM y PM
+    fecha_str_normalizada = fecha_str.replace("a. m.", "AM").replace("p. m.", "PM")
+    
+    # Lista de formatos a intentar
+    formatos = [
+        "%d/%m/%Y %I:%M:%S %p",    # 10/12/2025 7:04:00 PM
+        "%d/%m/%Y %I:%M %p",       # 10/12/2025 7:04 PM
+        "%d/%m/%Y %H:%M:%S",       # 10/12/2025 19:04:00 (24h)
+        "%d/%m/%Y %H:%M",          # 10/12/2025 19:04 (24h)
+        "%Y-%m-%d %H:%M:%S",       # 2025-12-10 19:04:00
+        "%Y-%m-%d %H:%M",          # 2025-12-10 19:04
+    ]
+    
+    for formato in formatos:
+        try:
+            return pd.to_datetime(fecha_str_normalizada, format=formato)
+        except:
+            continue
+    
+    # Intentar con inferencia automática como último recurso
+    try:
+        return pd.to_datetime(fecha_str_normalizada, dayfirst=True)
+    except:
+        logger.warning(f"No se pudo parsear la fecha: {fecha_str}")
+        return pd.NaT
+
 def procesar_dataframe(df_filtrado):
     df = df_filtrado.copy()
+    
+    logger.info(f"Procesando {len(df)} filas")
+    logger.info(f"Primeras 3 fechas originales: {df['Fecha/Hora'].head(3).tolist()}")
 
-    # parsear "10/12/2025 7:04:00 p. m."
-    df["Fecha/Hora"] = pd.to_datetime(
-        df["Fecha/Hora"].astype(str).str.replace("a. m.", "AM").str.replace("p. m.", "PM"),
-        format="%d/%m/%Y %I:%M:%S %p",
-        errors="coerce"
-    )
+    # Parsear fechas con función flexible
+    df["Fecha/Hora"] = df["Fecha/Hora"].apply(parsear_fecha_flexible)
+    
+    # Log de fechas parseadas
+    logger.info(f"Fechas parseadas exitosamente: {df['Fecha/Hora'].notna().sum()}/{len(df)}")
+    logger.info(f"Primeras 3 fechas parseadas: {df['Fecha/Hora'].head(3).tolist()}")
 
     # Filtrar filas donde no se pudo parsear la fecha
+    df_original_len = len(df)
     df = df.dropna(subset=["Fecha/Hora"])
+    logger.info(f"Filas después de eliminar fechas inválidas: {len(df)}/{df_original_len}")
     
     if df.empty:
-        # Si no hay datos válidos, retornar DataFrame vacío con estructura correcta
+        logger.error("DataFrame vacío después del parseo de fechas")
         return pd.DataFrame(columns=[
             "Nombre y Apellido",
             "Fecha Inicial",
@@ -131,8 +180,11 @@ def procesar_dataframe(df_filtrado):
 
         rows.append(fila)
 
+    logger.info(f"Filas procesadas: {len(rows)}")
+
     # Verificar si hay rows antes de crear DataFrame
     if not rows:
+        logger.error("No se generaron filas después del procesamiento")
         df_final = pd.DataFrame(columns=[
             "Nombre y Apellido",
             "Fecha Inicial",
@@ -182,7 +234,9 @@ async def process_file(
 
     try:
         df = pd.read_excel(io.BytesIO(data))
+        logger.info(f"Archivo leído: {len(df)} filas, columnas: {list(df.columns)}")
     except Exception as e:
+        logger.error(f"Error leyendo Excel: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Error leyendo Excel: {str(e)}")
 
     # Verificar que el DataFrame no esté vacío
@@ -200,6 +254,8 @@ async def process_file(
     df_filtrado = df[columnas].copy()
     df_filtrado = df_filtrado.dropna(how='all')
     
+    logger.info(f"Datos a procesar: {len(df_filtrado)} filas")
+    
     if df_filtrado.empty:
         raise HTTPException(
             status_code=400,
@@ -210,11 +266,13 @@ async def process_file(
     try:
         df_final = procesar_dataframe(df_filtrado)
     except KeyError as e:
+        logger.error(f"KeyError: {str(e)}")
         raise HTTPException(
             status_code=500, 
             detail=f"Error procesando datos - columna faltante: {str(e)}"
         )
     except Exception as e:
+        logger.error(f"Error procesando: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, 
             detail=f"Error procesando datos: {str(e)}"
@@ -222,10 +280,13 @@ async def process_file(
 
     # Verificar que el resultado tiene datos
     if df_final.empty:
+        logger.error("DataFrame final vacío")
         raise HTTPException(
             status_code=400,
             detail="No se pudieron procesar los datos. Verifica el formato de las fechas."
         )
+
+    logger.info(f"Procesamiento exitoso: {len(df_final)} filas en resultado")
 
     # Exportar en el formato especificado
     out = io.BytesIO()
@@ -244,6 +305,7 @@ async def process_file(
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             filename = "procesado.xlsx"
     except Exception as e:
+        logger.error(f"Error exportando: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error exportando archivo: {str(e)}")
     
     out.seek(0)
@@ -262,14 +324,47 @@ async def process_file(
 async def root():
     return {
         "message": "API de Procesamiento de Asistencia - ETL by Juancai",
-        "version": "2.0",
+        "version": "2.1",
         "endpoint": "/process",
         "formatos_soportados": ["xlsx", "xls"],
         "columnas_requeridas": ["Nombre y Apellido", "Fecha/Hora"],
-        "formato_fecha": "dd/mm/yyyy h:mm:ss a. m./p. m."
+        "formato_fecha": "dd/mm/yyyy h:mm:ss a. m./p. m. o automático"
     }
 
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "attendance-processor"}
+
+
+# Endpoint de debugging
+@app.post("/debug")
+async def debug_file(file: UploadFile = File(...)):
+    """Endpoint de debugging para ver qué recibe la API"""
+    data = await file.read()
+    
+    try:
+        df = pd.read_excel(io.BytesIO(data))
+        
+        # Intentar parsear las fechas
+        df_test = df.copy()
+        if "Fecha/Hora" in df_test.columns:
+            fechas_originales = df_test["Fecha/Hora"].head(5).tolist()
+            df_test["Fecha/Hora_Parseada"] = df_test["Fecha/Hora"].apply(parsear_fecha_flexible)
+            fechas_parseadas = df_test["Fecha/Hora_Parseada"].head(5).tolist()
+        else:
+            fechas_originales = []
+            fechas_parseadas = []
+        
+        return {
+            "filename": file.filename,
+            "shape": df.shape,
+            "columns": list(df.columns),
+            "first_5_rows": df.head().to_dict(orient="records"),
+            "dtypes": df.dtypes.astype(str).to_dict(),
+            "fechas_originales": [str(f) for f in fechas_originales],
+            "fechas_parseadas": [str(f) for f in fechas_parseadas],
+            "fechas_parseadas_exitosamente": sum(pd.notna(fechas_parseadas))
+        }
+    except Exception as e:
+        return {"error": str(e)}
