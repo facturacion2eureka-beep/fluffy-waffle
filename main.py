@@ -242,9 +242,9 @@ async def process_file(
 
         logger.info(f"Archivo leído: {len(df)} filas, columnas: {list(df.columns)}")
 
-except Exception as e:
-    logger.error(f"Error leyendo Excel: {str(e)}")
-    raise HTTPException(status_code=400, detail=f"Error leyendo Excel: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error leyendo Excel: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error leyendo Excel: {str(e)}")
 
     # Verificar que el DataFrame no esté vacío
     if df.empty:
