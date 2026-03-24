@@ -233,11 +233,18 @@ async def process_file(
     data = await file.read()
 
     try:
-        df = pd.read_excel(io.BytesIO(data))
+        if file.filename.lower().endswith(".xlsx"):
+            df = pd.read_excel(io.BytesIO(data), engine="openpyxl")
+        elif file.filename.lower().endswith(".xls"):
+            df = pd.read_excel(io.BytesIO(data), engine="xlrd")
+        else:
+            raise ValueError("Formato no soportado")
+
         logger.info(f"Archivo leído: {len(df)} filas, columnas: {list(df.columns)}")
-    except Exception as e:
-        logger.error(f"Error leyendo Excel: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Error leyendo Excel: {str(e)}")
+
+except Exception as e:
+    logger.error(f"Error leyendo Excel: {str(e)}")
+    raise HTTPException(status_code=400, detail=f"Error leyendo Excel: {str(e)}")
 
     # Verificar que el DataFrame no esté vacío
     if df.empty:
